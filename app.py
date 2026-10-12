@@ -12,7 +12,7 @@ from ta.volatility import BollingerBands
 from sklearn.metrics import accuracy_score
 from xgboost import XGBClassifier, XGBRegressor
 
-# إعدادات الواجهة الرئيسية
+# إعدادات الواجهة
 st.set_page_config(page_title="AI Financial Agent", layout="wide", initial_sidebar_state="expanded")
 
 st.sidebar.title("🎛️ الوكيل المالي الذكي")
@@ -34,7 +34,7 @@ us_stocks = {
     "Microsoft (MSFT)": "MSFT",
     "Tesla (TSLA)": "TSLA",
     "Amazon (AMZN)": "AMZN",
-    "Alphabet / Google (GOOGL)": "GOOGL"
+    "Google (GOOGL)": "GOOGL"
 }
 
 active_stock_dict = saudi_stocks if market_choice == "السوق السعودي (تداول)" else us_stocks
@@ -57,7 +57,7 @@ if custom_sym.strip():
     symbol = normalize_symbol(custom_sym)
 
 # -------------------------------------------------------------
-# دوال جلب البيانات والمؤشرات الفنية
+# جلب ومعالجة البيانات الفنية والأساسية الشاملة
 # -------------------------------------------------------------
 @st.cache_data(ttl=900)
 def load_stock_data(sym):
@@ -68,7 +68,7 @@ def load_stock_data(sym):
             return None, None
         df.index = pd.to_datetime(df.index).tz_localize(None)
         
-        # مؤشرات التحليل الفني
+        # مؤشرات فنية
         df['RSI'] = RSIIndicator(close=df['Close'], window=14).rsi()
         macd = MACD(close=df['Close'])
         df['MACD'] = macd.macd()
@@ -80,22 +80,39 @@ def load_stock_data(sym):
         df['BB_Lower'] = bb.bollinger_lband()
         df['Target'] = np.where(df['Close'].shift(-1) > df['Close'], 1, 0)
 
-        # المؤشرات المالية
+        # استخراج كافة النسب المالية الأساسية
         fundamentals = {}
         try:
             info = ticker.info
-            fundamentals['PE'] = info.get('trailingPE', info.get('forwardPE', 'N/A'))
-            fundamentals['ROE'] = info.get('returnOnEquity', 'N/A')
-            fundamentals['DebtToEquity'] = info.get('debtToEquity', 'N/A')
+            # السيولة (قصير المدى)
+            fundamentals['currentRatio'] = info.get('currentRatio')
+            fundamentals['quickRatio'] = info.get('quickRatio')
+            
+            # الهوامش والديون والتقييم (متوسط المدى)
+            fundamentals['PE'] = info.get('trailingPE', info.get('forwardPE'))
+            fundamentals['operatingMargins'] = info.get('operatingMargins')
+            fundamentals['profitMargins'] = info.get('profitMargins')
+            d_e = info.get('debtToEquity')
+            fundamentals['debtToEquity'] = (d_e / 100.0) if (d_e and d_e > 5) else d_e
+
+            # التدفقات والنمو والتوزيعات (بعيد المدى)
+            fundamentals['ROE'] = info.get('returnOnEquity')
+            fundamentals['pegRatio'] = info.get('pegRatio')
+            fundamentals['dividendYield'] = info.get('dividendYield')
+            fundamentals['payoutRatio'] = info.get('payoutRatio')
+            
+            fcf = info.get('freeCashflow')
+            mcap = info.get('marketCap')
+            fundamentals['fcfYield'] = (fcf / mcap) if (fcf and mcap) else None
         except Exception:
-            fundamentals = {'PE': 'N/A', 'ROE': 'N/A', 'DebtToEquity': 'N/A'}
+            pass
 
         return df.dropna(), fundamentals
     except Exception:
         return None, None
 
 # -------------------------------------------------------------
-# دالة تحليل مشاعر الأخبار (Financial News Sentiment)
+# دالة تحليل مشاعر الأخبار
 # -------------------------------------------------------------
 @st.cache_data(ttl=1800)
 def get_news_sentiment(sym):
@@ -105,100 +122,83 @@ def get_news_sentiment(sym):
         if not news_items:
             return 0.0, []
 
-        pos_words = {'gain', 'surge', 'jump', 'rise', 'record', 'profit', 'growth', 'bullish', 'high', 'dividend', 'strong', 'beat', 'ارتفاع', 'نمو', 'أرباح', 'صعود', 'توزيعات'}
-        neg_words = {'drop', 'fall', 'plunge', 'decline', 'loss', 'bearish', 'cut', 'slump', 'down', 'miss', 'risk', 'crisis', 'انخفاض', 'هبوط', 'خسائر', 'تراجع', 'عجز'}
+        pos_words = {'gain', 'surge', 'jump', 'rise', 'profit', 'growth', 'bullish', 'high', 'dividend', 'strong', 'beat', 'ارتفاع', 'نمو', 'أرباح', 'صعود', 'توزيعات'}
+        neg_words = {'drop', 'fall', 'plunge', 'decline', 'loss', 'bearish', 'cut', 'slump', 'down', 'risk', 'crisis', 'انخفاض', 'هبوط', 'خسائر', 'تراجع'}
 
-        scored_news = []
-        scores = []
+        scored_news, scores = [], []
         for item in news_items[:6]:
             title = item.get('title', '')
-            link = item.get('link', '#')
-            publisher = item.get('publisher', 'Market News')
             words = set(title.lower().split())
-            
-            p_count = len(words.intersection(pos_words))
-            n_count = len(words.intersection(neg_words))
+            p_count, n_count = len(words.intersection(pos_words)), len(words.intersection(neg_words))
             score = (p_count - n_count) / max((p_count + n_count), 1) if (p_count + n_count) > 0 else 0.0
             scores.append(score)
-            
-            sentiment_label = "🟢 إيجابي" if score > 0 else ("🔴 سلبي" if score < 0 else "⚪ محايد")
-            scored_news.append({"title": title, "publisher": publisher, "link": link, "label": sentiment_label})
+            label = "🟢 إيجابي" if score > 0 else ("🔴 سلبي" if score < 0 else "⚪ محايد")
+            scored_news.append({"title": title, "publisher": item.get('publisher', 'Market'), "link": item.get('link', '#'), "label": label})
 
-        avg_sentiment = float(np.mean(scores)) if scores else 0.0
-        return round(avg_sentiment, 2), scored_news
+        return round(float(np.mean(scores)), 2) if scores else 0.0, scored_news
     except Exception:
         return 0.0, []
 
 # -------------------------------------------------------------
-# دالة توقع الأسعار للأيام الخمسة القادمة (5-Day Price Forecast)
+# دالة توقع الأسعار للأيام الخمسة القادمة
 # -------------------------------------------------------------
 def predict_future_prices(df):
     features = ['Close', 'Volume', 'RSI', 'MACD', 'SMA_50', 'BB_Upper', 'BB_Lower']
     X = df[features].iloc[:-5]
     forecast_results = []
-    
-    last_price = df['Close'].iloc[-1]
-    current_features = df[features].iloc[-1:]
+    last_p = df['Close'].iloc[-1]
+    curr_feat = df[features].iloc[-1:]
 
     for day in range(1, 6):
         y = df['Close'].shift(-day).iloc[:-5]
         reg = XGBRegressor(n_estimators=50, max_depth=3, learning_rate=0.08, random_state=42)
         reg.fit(X, y)
-        pred_val = float(reg.predict(current_features)[0])
-        
-        # حساب نطاق تذبذب تقريبي بناءً على تقلبات السهم
-        volatility = df['Close'].pct_change().std() * np.sqrt(day) * last_price
+        p = float(reg.predict(curr_feat)[0])
+        vol = df['Close'].pct_change().std() * np.sqrt(day) * last_p
         forecast_results.append({
-            "Day": f"اليوم +{day}",
-            "Predicted": round(pred_val, 2),
-            "Lower": round(pred_val - (volatility * 0.8), 2),
-            "Upper": round(pred_val + (volatility * 0.8), 2),
-            "ChangePct": round(((pred_val - last_price) / last_price) * 100, 2)
+            "اليوم": f"يوم +{day}",
+            "السعر المتوقع": round(p, 2),
+            "الحد الأدنى": round(p - (vol * 0.8), 2),
+            "الحد الأعلى": round(p + (vol * 0.8), 2),
+            "التغير (%)": f"{((p - last_p) / last_p) * 100:+.2f}%"
         })
     return pd.DataFrame(forecast_results)
 
 # -------------------------------------------------------------
-# دالة تصنيف وترتيب الأسهم (Stock Ranking)
+# دالة تقييم بطاقات النسب المالية الذكية
 # -------------------------------------------------------------
-@st.cache_data(ttl=3600)
-def generate_market_ranking(stock_dict):
-    ranking_data = []
-    for name, sym in stock_dict.items():
-        try:
-            d = yf.Ticker(sym).history(period="6mo", interval="1d")
-            if d.empty or len(d) < 30:
-                continue
-            rsi = RSIIndicator(close=d['Close'], window=14).rsi().iloc[-1]
-            sma50 = SMAIndicator(close=d['Close'], window=50).sma_indicator().iloc[-1]
-            last_p = d['Close'].iloc[-1]
-            change_month = ((last_p - d['Close'].iloc[-20]) / d['Close'].iloc[-20]) * 100
-            
-            # احتساب درجة القوة المركبة (Composite Score من 100)
-            score = 50
-            if rsi < 35: score += 20
-            elif rsi > 70: score -= 15
-            else: score += 5
-            
-            if last_p > sma50: score += 15
-            if change_month > 0: score += 10
-            
-            rank_label = "🟢 فرصة شراء قوية" if score >= 75 else ("🟡 شراء تدريجي" if score >= 60 else "⚪ حياد / مراقبة")
-            ranking_data.append({
-                "السهم": name,
-                "الرمز": sym,
-                "السعر الأخير": round(last_p, 2),
-                "RSI": round(rsi, 1),
-                "تغير شهر (%)": f"{change_month:+.1f}%",
-                "درجة القوة": min(score, 100),
-                "التقييم": rank_label
-            })
-        except Exception:
-            continue
-    df_rank = pd.DataFrame(ranking_data)
-    return df_rank.sort_values(by="درجة القوة", ascending=False) if not df_rank.empty else df_rank
+def render_metric_card(name, val, formatted_val, condition_pos, condition_warn, explanation):
+    if val is None or val == 'N/A':
+        st.markdown(f"""
+        <div style="background:#1e222d; padding:12px; border-radius:8px; border:1px solid #333; margin-bottom:10px;">
+            <span style="color:#aaa; font-size:13px;">{name}</span>
+            <h4 style="margin:4px 0; color:#888;">غير متوفر</h4>
+            <span style="font-size:11px; color:#666;">{explanation}</span>
+        </div>
+        """, unsafe_allow_html=True)
+        return 0
+
+    if condition_pos(val):
+        color, badge, score_pt = "#00e676", "🟢 صحي / ممتاز", 1
+    elif condition_warn(val):
+        color, badge, score_pt = "#ffb300", "🟡 مقبول / مراقبة", 0.5
+    else:
+        color, badge, score_pt = "#ff5252", "🔴 خطر / سلبي", 0
+
+    st.markdown(f"""
+    <div style="background:#1e222d; padding:12px; border-radius:8px; border-left:4px solid {color}; margin-bottom:10px;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <span style="color:#ddd; font-weight:bold; font-size:14px;">{name}</span>
+            <span style="color:{color}; font-size:12px; font-weight:bold;">{badge}</span>
+        </div>
+        <h3 style="margin:4px 0; color:{color}; font-size:22px;">{formatted_val}</h3>
+        <p style="margin:0; font-size:11px; color:#aaa;">{explanation}</p>
+    </div>
+    """, unsafe_allow_html=True)
+    return score_pt
 
 # -------------------------------------------------------------
-# واجهة العرض والتحليل
+# واجهة التطبيق
 # -------------------------------------------------------------
 data, fundamentals = load_stock_data(symbol)
 sentiment_score, news_list = get_news_sentiment(symbol)
@@ -206,9 +206,9 @@ sentiment_score, news_list = get_news_sentiment(symbol)
 st.title(f"📈 الوكيل المالي الذكي: {symbol}")
 
 if data is None:
-    st.error(f"تعذر جلب بيانات السهم `{symbol}`. تأكد من صحة الرمز.")
+    st.error(f"تعذر جلب بيانات السهم `{symbol}`. تأكد من صحة الرمز والاتصال.")
 else:
-    # تشغيل نموذج الاتجاه (XGBoost Classifier 80/20)
+    # تشغيل نموذج الذكاء الاصطناعي (XGBoost)
     features = ['Close', 'Volume', 'RSI', 'MACD', 'MACD_Signal', 'SMA_50', 'SMA_200', 'BB_Upper', 'BB_Lower']
     X = data[features]
     y = data['Target']
@@ -226,25 +226,24 @@ else:
 
     # بطاقات المؤشرات العلوية
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("السعر الأخير (Close)", f"{data['Close'].iloc[-1]:.2f}")
+    c1.metric("السعر الأخير", f"{data['Close'].iloc[-1]:.2f}")
     c2.markdown(f"<div style='background:#1e222d;padding:10px;border-radius:6px;border-left:4px solid {color};'><b style='color:{color}; font-size:18px;'>{signal}</b></div>", unsafe_allow_html=True)
     c3.metric("احتمالية الصعود (AI)", f"{prob * 100:.1f}%")
-    c4.metric("مؤشر المشاعر (Sentiment)", f"{sentiment_score:+.2f}")
+    c4.metric("مؤشر المشاعر", f"{sentiment_score:+.2f}")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # تبويبات النظام الكاملة
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    # التبويبات
+    tab_tv, tab_fundamentals, tab_forecast, tab_sentiment = st.tabs([
         "📈 الشارت الحي (TradingView)",
+        "📑 الملاءة والتحليل الأساسي (صحي/خطر)",
         "🔮 توقع الأسعار (5-Day Forecast)",
-        "📰 مشاعر الأخبار (Sentiment)",
-        "🏆 تصنيف الأسهم (Stock Ranking)",
-        "📑 المؤشرات الفنية والمالية"
+        "📰 مشاعر الأخبار (Sentiment)"
     ])
 
     # 1. TradingView Widget
-    with tab1:
-        st.subheader("الرسم البياني الحي من TradingView")
+    with tab_tv:
+        st.subheader("رسم بياني حي من TradingView")
         tv_symbol = f"TADAWUL:{symbol.replace('.SR','')}" if ".SR" in symbol else symbol
         tv_html = f"""
         <div style="height:520px;width:100%;">
@@ -254,62 +253,91 @@ else:
         """
         components.html(tv_html, height=530)
 
-    # 2. توقع المدى السعري
-    with tab2:
-        st.subheader("توقع مسار السعر للأيام الخمسة القادمة (AI Price Forecast)")
+    # 2. تبويب التحليل الأساسي الشامل والمصنف زمنياً
+    with tab_fundamentals:
+        st.subheader("🔍 فحص النسب المالية للمستثمر (تقييم السلامة المالية)")
+        st.write("تحليل متقدم يصنف المؤشرات المالية للشركة بحسب الأفق الزمني لاكتشاف فرص القوة ومكامن الخطر:")
+
+        col_st, col_md, col_lt = st.columns(3)
+
+        # المدى القصير (السيولة)
+        with col_st:
+            st.markdown("#### ⏱️ المدى القصير (السيولة)")
+            cr = fundamentals.get('currentRatio')
+            render_metric_card(
+                "نسبة التداول (Current Ratio)", cr, f"{cr:.2f}" if cr else "N/A",
+                lambda v: v >= 1.5, lambda v: 1.0 <= v < 1.5,
+                "يقيس القدرة على الوفاء بديون السنة الحالية (> 1.5 آمن)."
+            )
+            qr = fundamentals.get('quickRatio')
+            render_metric_card(
+                "السيولة السريعة (Quick Ratio)", qr, f"{qr:.2f}" if qr else "N/A",
+                lambda v: v >= 1.0, lambda v: 0.7 <= v < 1.0,
+                "تغطية الديون الفورية دون الحاجة لبيع المخزون (> 1.0 ممتاز)."
+            )
+
+        # المدى المتوسط (الربحية والديون)
+        with col_md:
+            st.markdown("#### 📊 المدى المتوسط (الأرباح والديون)")
+            pe = fundamentals.get('PE')
+            render_metric_card(
+                "مكرر الأرباح (P/E Ratio)", pe, f"{pe:.2f}" if pe else "N/A",
+                lambda v: 0 < v <= 18, lambda v: 18 < v <= 28,
+                "تكلفة السهم مقابل كل ريال ربح (أقل من 18 جذاب استثمارياً)."
+            )
+            om = fundamentals.get('operatingMargins')
+            render_metric_card(
+                "الهامش التشغيلي (Operating Margin)", om, f"{om*100:.1f}%" if om else "N/A",
+                lambda v: v >= 0.18, lambda v: 0.08 <= v < 0.18,
+                "كفاءة العمليات وضبط التكاليف قبل الفوائد والضرائب (> 18% قوي)."
+            )
+            de = fundamentals.get('debtToEquity')
+            render_metric_card(
+                "الديون للملكية (Debt / Equity)", de, f"{de:.2f}" if de else "N/A",
+                lambda v: v <= 0.8, lambda v: 0.8 < v <= 1.4,
+                "حجم القروض مقارنة بأموال الملاك (< 0.8 استقرار مالي عالي)."
+            )
+
+        # المدى البعيد (النمو واستدامة رأس المال)
+        with col_lt:
+            st.markdown("#### 🏛️ المدى البعيد (النمو والتدفقات)")
+            roe = fundamentals.get('ROE')
+            render_metric_card(
+                "العائد على الملكية (ROE)", roe, f"{roe*100:.1f}%" if roe else "N/A",
+                lambda v: v >= 0.15, lambda v: 0.08 <= v < 0.15,
+                "مردود استثمار أموال المساهمين (> 15% إدارة استثنائية)."
+            )
+            peg = fundamentals.get('pegRatio')
+            render_metric_card(
+                "مكرر الربح للنمو (PEG Ratio)", peg, f"{peg:.2f}" if peg else "N/A",
+                lambda v: 0 < v <= 1.2, lambda v: 1.2 < v <= 2.0,
+                "يقيم السعر قياساً بسرعة نمو الأرباح (< 1.2 سهم رخيص لنموه)."
+            )
+            fcf = fundamentals.get('fcfYield')
+            render_metric_card(
+                "عائد التدفق الحر (FCF Yield)", fcf, f"{fcf*100:.1f}%" if fcf else "N/A",
+                lambda v: v >= 0.06, lambda v: 0.02 <= v < 0.06,
+                "سيولة نقدية حقيقية باقية للتوزيعات والتوسع (> 6% قوي جداً)."
+            )
+            dy = fundamentals.get('dividendYield')
+            render_metric_card(
+                "عائد التوزيعات (Dividend Yield)", dy, f"{dy*100:.1f}%" if dy else "N/A",
+                lambda v: 0.04 <= v <= 0.08, lambda v: (0.01 <= v < 0.04) or (0.08 < v <= 0.11),
+                "الدخل النقدي السنوي المباشر للمساهم (4% - 8% مستدام ومجزٍ)."
+            )
+
+    # 3. توقع الأسعار
+    with tab_forecast:
+        st.subheader("توقع مسار السعر لـ 5 أيام قادمة")
         df_forecast = predict_future_prices(data)
-        
-        # رسم بياني لتوقع المسار المستقبلي
-        fig_f = go.Figure()
-        recent_history = data['Close'].iloc[-15:]
-        fig_f.add_trace(go.Scatter(x=list(range(-14, 1)), y=recent_history.values, mode='lines+markers', name='الأسعار السابقة', line=dict(color='#3b82f6', width=2)))
-        
-        future_x = list(range(1, 6))
-        fig_f.add_trace(go.Scatter(x=future_x, y=df_forecast['Predicted'], mode='lines+markers', name='السعر المتوقع', line=dict(color='#00e676', dash='dash', width=2)))
-        fig_f.add_trace(go.Scatter(x=future_x, y=df_forecast['Upper'], mode='lines', name='الحد الأعلى', line=dict(width=0), showlegend=False))
-        fig_f.add_trace(go.Scatter(x=future_x, y=df_forecast['Lower'], mode='lines', name='نطاق التذبذب', fill='tonexty', fillcolor='rgba(0, 230, 118, 0.15)', line=dict(width=0)))
-        
-        fig_f.update_layout(template="plotly_dark", height=380, xaxis_title="الأيام (0 = اليوم الحالي)", yaxis_title="السعر", margin=dict(l=20, r=20, t=30, b=20))
-        st.plotly_chart(fig_f, use_container_width=True)
-        
         st.dataframe(df_forecast, hide_index=True, use_container_width=True)
 
-    # 3. مشاعر الأخبار
-    with tab3:
-        st.subheader("تحليل نبرة الأخبار الحالية")
-        st.write(f"درجة المشاعر العامة: **`{sentiment_score:+.2f}`** (تتراوح بين +1.0 إيجابي جداً و -1.0 سلبي جداً)")
+    # 4. الأخبار والمشاعر
+    with tab_sentiment:
+        st.subheader("الأخبار الحديثة ونبرة السوق")
+        st.write(f"مؤشر المشاعر الكلي: **`{sentiment_score:+.2f}`**")
         if news_list:
             for item in news_list:
                 st.markdown(f"**{item['label']}** | [{item['title']}]({item['link']}) — *{item['publisher']}*")
         else:
-            st.info("لا توجد أخبار حديثة مسجلة لهذا السهم عبر التغذية الإخبارية.")
-
-    # 4. تصنيف وترتيب الأسهم
-    with tab4:
-        st.subheader(f"ترتيب فرص {market_choice} بناءً على درجة القوة المركبة")
-        with st.spinner("جاري فحص وترتيب أسهم السوق..."):
-            df_ranks = generate_market_ranking(active_stock_dict)
-            if not df_ranks.empty:
-                st.dataframe(df_ranks, hide_index=True, use_container_width=True)
-            else:
-                st.warning("تعذر إنشاء جدول الترتيب حالياً.")
-
-    # 5. التفاصيل الفنية والأساسية
-    with tab5:
-        col_f1, col_f2, col_f3 = st.columns(3)
-        with col_f1:
-            pe = f"{fundamentals['PE']:.2f}" if isinstance(fundamentals['PE'], (int, float)) else str(fundamentals['PE'])
-            st.metric("مكرر الأرباح (P/E)", pe)
-        with col_f2:
-            roe = f"{fundamentals['ROE']*100:.2f}%" if isinstance(fundamentals['ROE'], (int, float)) else str(fundamentals['ROE'])
-            st.metric("العائد على الملكية (ROE)", roe)
-        with col_f3:
-            st.metric("مؤشر RSI (14)", f"{data['RSI'].iloc[-1]:.2f}")
-
-        # شارت الشموع اليابانية المحلي
-        fig_candle = go.Figure()
-        fig_candle.add_trace(go.Candlestick(x=data.index, open=data['Open'], high=data['High'], low=data['Low'], close=data['Close'], name="السعر"))
-        fig_candle.add_trace(go.Scatter(x=data.index, y=data['SMA_50'], line=dict(color='orange'), name="SMA 50"))
-        fig_candle.add_trace(go.Scatter(x=data.index, y=data['SMA_200'], line=dict(color='blue'), name="SMA 200"))
-        fig_candle.update_layout(template="plotly_dark", height=380, xaxis_rangeslider_visible=False, margin=dict(l=20, r=20, t=20, b=20))
-        st.plotly_chart(fig_candle, use_container_width=True)
+            st.info("لا توجد أخبار مسجلة حالياً.")
